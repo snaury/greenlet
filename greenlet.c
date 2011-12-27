@@ -166,7 +166,9 @@ static PyObject* ts_delkey;
 static PyObject* PyExc_GreenletError;
 static PyObject* PyExc_GreenletExit;
 
-#define GREENLET_USE_GC
+#ifndef GREENLET_USE_GC
+#define GREENLET_USE_GC 2
+#endif
 
 #ifdef GREENLET_USE_GC
 #define GREENLET_GC_FLAGS Py_TPFLAGS_HAVE_GC
@@ -614,8 +616,14 @@ static void GREENLET_NOINLINE(g_initialstub)(void* mark)
 			result = NULL;
 		else {
 			/* call g.run(*args, **kwargs) */
+			ts_self->stub_refs[0] = run;
+			ts_self->stub_refs[1] = args;
+			ts_self->stub_refs[2] = kwargs;
 			result = PyEval_CallObjectWithKeywords(
 				run, args, kwargs);
+			ts_self->stub_refs[0] = NULL;
+			ts_self->stub_refs[1] = NULL;
+			ts_self->stub_refs[2] = NULL;
 			Py_DECREF(args);
 			Py_XDECREF(kwargs);
 		}
@@ -716,9 +724,17 @@ static int kill_greenlet(PyGreenlet* self)
 }
 
 #ifdef GREENLET_USE_GC
+#if GREENLET_USE_GC >= 2
+#include <frameobject.h>
+#endif
+
 static int
 green_traverse(PyGreenlet *self, visitproc visit, void *arg)
 {
+#if GREENLET_USE_GC >= 2
+	unsigned i;
+	struct _frame *frame;
+#endif
 	/* We must only visit referenced objects, i.e. only objects
 	   Py_INCREF'ed by this greenlet (directly or indirectly):
 	   - stack_prev is not visited: holds previous stack pointer, but it's not referenced
@@ -728,20 +744,77 @@ green_traverse(PyGreenlet *self, visitproc visit, void *arg)
 	Py_VISIT(self->exc_type);
 	Py_VISIT(self->exc_value);
 	Py_VISIT(self->exc_traceback);
+#if GREENLET_USE_GC >= 2
+	/* XXX: hack: visit all greenlet's frames
+	   Even though we don't reference frames beyond the top one, we need
+	   to visit them all, otherwise those frames will mark this greenlet
+	   reachable during gc :( */
+	frame = self->top_frame;
+	while (frame) {
+		Py_VISIT(frame);
+		frame = frame->f_back;
+	}
+	for (i = 0; i < 3; ++i) {
+		PyObject* ref = self->stub_refs[i];
+		Py_VISIT(ref);
+		/* XXX: need to visit args twice
+		   1. Reference is held in the stub itself
+		   2. Py_INCREF'ed in PyEval_CallObjectWithKeywords
+		   It's implementation dependent, but unfortunately there's no other way */
+		if (i == 1 && ref) {
+			Py_VISIT(ref);
+		}
+	}
+	for (i = 0; i < 2; ++i) {
+		PyObject *ref = self->switch_refs[i];
+		Py_VISIT(ref);
+	}
+#endif
 	return 0;
 }
 
 static int green_is_gc(PyGreenlet* self)
 {
 	int rval;
+#if GREENLET_USE_GC >= 2
+	/* Main greenlets are not garbage collectable */
+	rval = (self->stack_stop == (char *)-1) ? 0 : 1;
+#else
 	/* Main and alive greenlets are not garbage collectable */
 	rval = (self->stack_stop == (char *)-1 || self->stack_start != NULL) ? 0 : 1;
+#endif
 	return rval;
 }
 
 static int green_clear(PyGreenlet* self)
 {
-	return 0; /* greenlet is not alive, so there's nothing to clear */
+	int result = 0;
+#if GREENLET_USE_GC >= 2
+	if (PyGreenlet_ACTIVE(self)) {
+		/* When tp_clear is called we are first on the unreachable list,
+		   so by following the gc_prev link we may first the list itself */
+		PyGC_Head *list = (((PyGC_Head*)self) - 1)->gc.gc_prev;
+		PyGC_Head *sentinel = (PyGC_Head*)PyMem_Malloc(sizeof(PyGC_Head));
+		/* XXX: if sentinel allocation fails there's
+		   no way to make switching safe, so we don't */
+		if (sentinel != NULL) {
+			/* Insert sentinel at the end of the list */
+			sentinel->gc.gc_next = list;
+			sentinel->gc.gc_prev = list->gc.gc_prev;
+			list->gc.gc_prev->gc.gc_next = sentinel;
+			list->gc.gc_prev = sentinel;
+			/* Attempt to kill greenlet */
+			result = kill_greenlet(self);
+			/* Remove sentinel from the list */
+			sentinel->gc.gc_prev->gc.gc_next = sentinel->gc.gc_next;
+			sentinel->gc.gc_next->gc.gc_prev = sentinel->gc.gc_prev;
+			/* Free the sentinel */
+			PyMem_Free(sentinel);
+		}
+		/* XXX: finalizers list is still a major danger */
+	}
+#endif
+	return result;
 }
 #endif
 
@@ -864,11 +937,19 @@ static PyObject* green_switch(
 	PyObject* args,
 	PyObject* kwargs)
 {
+	PyObject *result;
+	PyGreenlet *current;
 	if (!STATE_OK)
 		return NULL;
 	Py_INCREF(args);
 	Py_XINCREF(kwargs);
-	return single_result(g_switch(self, args, kwargs));
+	current = ts_current;
+	current->switch_refs[0] = args;
+	current->switch_refs[1] = kwargs;
+	result = single_result(g_switch(self, args, kwargs));
+	current->switch_refs[0] = NULL;
+	current->switch_refs[1] = NULL;
+	return result;
 }
 
 /* Macros required to support Python < 2.6 for green_throw() */
@@ -905,6 +986,8 @@ green_throw(PyGreenlet *self, PyObject *args)
 	PyObject *typ = PyExc_GreenletExit;
 	PyObject *val = NULL;
 	PyObject *tb = NULL;
+	PyObject *result;
+	PyGreenlet *current;
 
 	if (!PyArg_ParseTuple(args, "|OOO:throw", &typ, &val, &tb))
 	{
@@ -963,7 +1046,11 @@ green_throw(PyGreenlet *self, PyObject *args)
 
 	if (!STATE_OK)
 		goto failed_throw;
-	return throw_greenlet(self, typ, val, tb);
+	current = ts_current;
+	current->switch_refs[0] = args;
+	result = throw_greenlet(self, typ, val, tb);
+	current->switch_refs[0] = NULL;
+	return result;
 
  failed_throw:
 	/* Didn't use our arguments, so restore their original refcounts */
@@ -1342,6 +1429,11 @@ initgreenlet(void)
 	PyModule_AddObject(m, "GreenletExit", PyExc_GreenletExit);
 #ifdef GREENLET_USE_GC
 	PyModule_AddObject(m, "GREENLET_USE_GC", PyBool_FromLong(1));
+#if GREENLET_USE_GC >= 2
+	PyModule_AddObject(m, "GREENLET_USE_GC_FULL", PyBool_FromLong(1));
+#else
+	PyModule_AddObject(m, "GREENLET_USE_GC_FULL", PyBool_FromLong(0));
+#endif
 #else
 	PyModule_AddObject(m, "GREENLET_USE_GC", PyBool_FromLong(0));
 #endif
