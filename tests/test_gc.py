@@ -129,3 +129,19 @@ class GCTests(unittest.TestCase):
             gc.collect()
             self.assertTrue(o() is None)
             self.assertFalse(gc.garbage, gc.garbage)
+
+        def test_finalizer_ref(self):
+            class object_with_finalizer(object):
+                def __del__(self):
+                    pass
+            def greenlet_body():
+                g = greenlet.getcurrent()
+                o = object_with_finalizer()
+                try:
+                    g.parent.switch(g)
+                finally:
+                    pass
+            o = weakref.ref(greenlet.greenlet(greenlet_body).switch())
+            gc.collect()
+            self.assertTrue(o() is None)
+            self.assertFalse(gc.garbage, gc.garbage)
