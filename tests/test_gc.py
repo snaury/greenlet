@@ -90,7 +90,7 @@ class GCTests(unittest.TestCase):
             self.assertTrue(o() is None)
             self.assertFalse(gc.garbage, gc.garbage)
 
-    if greenlet.GREENLET_USE_GC and greenlet.GREENLET_USE_GC_FULL:
+    if greenlet.GREENLET_USE_GC_FULL:
         # These only work with greenlet full gc support
 
         def test_live_circular_ref(self):

@@ -1436,6 +1436,7 @@ initgreenlet(void)
 #endif
 #else
 	PyModule_AddObject(m, "GREENLET_USE_GC", PyBool_FromLong(0));
+	PyModule_AddObject(m, "GREENLET_USE_GC_FULL", PyBool_FromLong(0));
 #endif
 
         /* also publish module-level data as attributes of the greentype. */
