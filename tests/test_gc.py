@@ -145,3 +145,44 @@ class GCTests(unittest.TestCase):
             gc.collect()
             self.assertTrue(o() is None)
             self.assertFalse(gc.garbage, gc.garbage)
+
+        def test_finalizer_indirect_ref(self):
+            # Why does this crash:
+            # - order of object creation is important
+            # - array is created first, so it is moved to unreachable first
+            # - we create a cycle between a greenlet and this array
+            # - we create an object that participates in gc is only
+            #   referenced by the greenlet, and would corrupt gc
+            #   lists on destruction, the easiest is to use
+            #   an object with a finalizer
+            # - because array is the first object in unreachable it is
+            #   cleared first, which causes all references to greenlet
+            #   to disappear and causes greenlet to be destroyed, but since
+            #   it is still live it causes a switch during gc, which causes
+            #   an object with finalizer to be destroyed, which causes stack
+            #   corruption and thus a crash
+            # - because greenlet's tp_clear is never called there's no
+            #   chance to insert safeguard sentinels before switching (also
+            #   no way to know whether destruction is due to gc or not,
+            #   whether greenlet itself is on gc lists or not, so no way
+            #   to reliably find unreachable/finalizer gc list heads on stack)
+            class object_with_finalizer(object):
+                def __del__(self):
+                    pass
+            array = []
+            parent = greenlet.getcurrent()
+            def greenlet_body():
+                a = array
+                o = object_with_finalizer()
+                try:
+                    parent.switch()
+                finally:
+                    pass
+            g = greenlet.greenlet(greenlet_body)
+            array.append(g)
+            g.switch()
+            array = None
+            g = weakref.ref(g)
+            gc.collect()
+            self.assertTrue(g() is None)
+            self.assertFalse(gc.garbage, gc.garbage)
