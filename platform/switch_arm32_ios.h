@@ -24,8 +24,13 @@
 /* iPhone OS uses r7 as a frame pointer and r9 as a scratch register.
    However, fp still resolves to r11 so need to use r7 explicitly below.
    Also, some vfp registers should be saved across calls and switches. */
-#define REGS_TO_SAVE "r4", "r5", "r6", "r8", "r10", "r11", "lr", \
+#define REGS_TO_SAVE_GENERAL "r4", "r5", "r6", "r8", "r10", "r11", "lr"
+#ifdef __VFP_FP__
+#define REGS_TO_SAVE REGS_TO_SAVE_GENERAL, \
                      "d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15"
+#else
+#define REGS_TO_SAVE REGS_TO_SAVE_GENERAL
+#endif
 
 static int
 slp_switch(void)
