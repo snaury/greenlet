@@ -10,16 +10,7 @@
 #define STACK_REFPLUS 1
 
 #ifdef SLP_EVAL
-#if defined(__clang__) && defined(DEBUG)
-/* HACK: in debug clang stores r0 (with result 0) on the top of the
-   stack before calling slp_restore_state. This causes slp_switch
-   to return result of the previous call or even garbage. This was
-   found on XCode 4.2.1 and relies on this specific clang r0 caching
-   inefficiency, they might change it in the future. */
-#define STACK_MAGIC 1
-#else
 #define STACK_MAGIC 0
-#endif
 
 /* iPhone OS uses r7 as a frame pointer and r9 as a scratch register.
    However, fp still resolves to r11 so need to use r7 explicitly below.
@@ -36,6 +27,7 @@ static int
 slp_switch(void)
 {
         void *fp;
+        register int result;
         register int *stackref, stsizediff;
         __asm__ volatile ("" : : : REGS_TO_SAVE);
         __asm__ volatile ("str r7,%0" : "=m" (fp));
@@ -47,12 +39,13 @@ slp_switch(void)
                     "add r7,r7,%0"
                     :
                     : "r" (stsizediff)
-                    );
+                    : REGS_TO_SAVE);
                 SLP_RESTORE_STATE();
         }
         __asm__ volatile ("ldr r7,%0" : : "m" (fp));
+        __asm__ volatile ("mov %0, #0" : "=r" (result));
         __asm__ volatile ("" : : : REGS_TO_SAVE);
-        return 0;
+        return result;
 }
 
 #endif
