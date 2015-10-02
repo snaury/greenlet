@@ -40,11 +40,8 @@
 
 #define STACK_MAGIC 3
 
-/* !!!!WARNING!!!! need to add "r31" in the next line if this header file
- * is meant to be compiled non-dynamically!
- */
 #define REGS_TO_SAVE "r13", "r14", "r15", "r16", "r17", "r18", "r19", "r20", \
-       "r21", "r22", "r23", "r24", "r25", "r26", "r27", "r28", "r29", \
+       "r21", "r22", "r23", "r24", "r25", "r26", "r27", "r28", "r29", "r31", \
        "cr2", "cr3", "cr4"
 static int
 slp_switch(void)
